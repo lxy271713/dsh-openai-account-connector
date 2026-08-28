@@ -1,0 +1,7 @@
+- id: llm-pi-ai
+  config:
+    delegatedProviders: [openai-codex]
+
+- insert:
+    - id: openai-account-connector
+      name: dsh-openai-account-connector
