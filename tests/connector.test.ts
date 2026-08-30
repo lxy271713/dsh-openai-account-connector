@@ -22,6 +22,7 @@ class FakeClient {
   generatedPath: string | undefined
   completeLogin = true
   completedAccount: unknown = { type: 'chatgpt' }
+  rejectForcedRefresh = false
   toolRequest: { tool: string; arguments: unknown } | undefined
   toolResponse: Record<string, unknown> | undefined
 
@@ -37,7 +38,12 @@ class FakeClient {
 
   async request<T>(method: string, params: Record<string, unknown> | undefined): Promise<T> {
     this.requests.push({ method, params })
-    if (method === 'account/read') return { account: this.account } as T
+    if (method === 'account/read') {
+      if (params?.refreshToken === true && this.rejectForcedRefresh) {
+        throw new Error('forced refresh unavailable')
+      }
+      return { account: this.account } as T
+    }
     if (method === 'account/login/start') {
       if (this.completeLogin) {
         setTimeout(() => {
@@ -124,7 +130,28 @@ describe('OpenAI account connector', () => {
     expect(notices).toEqual([expect.objectContaining({ url: 'https://auth.openai.com/authorize' })])
     expect(modifyRecord).toHaveBeenCalledOnce()
     expect(await modifyRecord.mock.calls[0]![1](undefined)).toEqual({ kind: 'api-key' })
+    expect(client.requests).toContainEqual({ method: 'account/read', params: { refreshToken: true } })
     expect(JSON.stringify(client.requests)).not.toMatch(/accessToken|apiKey|authorization"\s*:/)
+  })
+
+  it('connects an existing ChatGPT account without forcing a token refresh', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.rejectForcedRefresh = true
+    let flow: AuthorizationFlow | undefined
+    const modifyRecord = vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined))
+    registerAuthorization({
+      authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
+      credentials: { modifyRecord },
+    } as unknown as Context, client as unknown as AppServerClient)
+
+    await flow!.run({
+      method: 'browser', signal: new AbortController().signal, notify: vi.fn(),
+      prompt: async () => { throw new Error('unexpected prompt') },
+    })
+
+    expect(modifyRecord).toHaveBeenCalledOnce()
+    expect(client.requests).not.toContainEqual({ method: 'account/read', params: { refreshToken: true } })
   })
 
   it('does not accept a non-ChatGPT account as an existing browser connection', async () => {

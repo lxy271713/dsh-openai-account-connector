@@ -27,12 +27,14 @@ export function registerAuthorization(ctx: Context, client: AppServerClient): vo
         'account/read', { refreshToken: false }, { signal: session.signal },
       )
       session.signal.throwIfAborted()
-      if (!isChatGptAccount(current.account)) await browserLogin(client, session)
-      const verified = await client.request<{ account?: unknown }>(
-        'account/read', { refreshToken: true }, { signal: session.signal },
-      )
-      session.signal.throwIfAborted()
-      if (!isChatGptAccount(verified.account)) throw new Error('OpenAI 官方登录未返回 ChatGPT 账号')
+      if (!isChatGptAccount(current.account)) {
+        await browserLogin(client, session)
+        const verified = await client.request<{ account?: unknown }>(
+          'account/read', { refreshToken: true }, { signal: session.signal },
+        )
+        session.signal.throwIfAborted()
+        if (!isChatGptAccount(verified.account)) throw new Error('OpenAI 官方登录未返回 ChatGPT 账号')
+      }
       await ctx.credentials.modifyRecord(CONNECTION_KEY, async () => ({ kind: 'api-key' }))
     },
   }
