@@ -41,6 +41,7 @@ export class AppServerClient {
   private readonly listeners = new Set<(message: AppServerNotification) => void>()
   private readonly requestListeners = new Set<(message: AppServerInboundRequest) => boolean>()
   private generation = 0
+  private codexHome: string | null = null
 
   constructor(
     private readonly executable = process.env.CODEX_BIN || 'codex',
@@ -77,6 +78,12 @@ export class AppServerClient {
     this.reset(new Error('OpenAI account connector stopped'))
   }
 
+  /** Runtime-owned root returned by the official initialize handshake. */
+  getCodexHome(): string {
+    if (!this.codexHome) throw new AppServerRequestError('OpenAI account runtime did not return its data root', 'TRANSPORT')
+    return this.codexHome
+  }
+
   private async ensureStarted(): Promise<void> {
     if (this.child) return
     if (this.starting) return this.starting
@@ -109,10 +116,14 @@ export class AppServerClient {
     child.once('exit', () => {
       if (this.generation === generation) this.reset(new Error('OpenAI account runtime exited'))
     })
-    await this.requestRaw('initialize', {
+    const initialized = await this.requestRaw('initialize', {
       clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.0' },
       capabilities: { experimentalApi: true, requestAttestation: false },
-    })
+    }) as { codexHome?: unknown }
+    if (typeof initialized.codexHome !== 'string' || !isAbsolute(initialized.codexHome)) {
+      throw new AppServerRequestError('OpenAI account runtime did not return its data root', 'TRANSPORT')
+    }
+    this.codexHome = initialized.codexHome
     this.write({ method: 'initialized', params: {} })
   }
 
@@ -211,6 +222,7 @@ export class AppServerClient {
 
   private reset(error: Error): void {
     this.child = null
+    this.codexHome = null
     for (const [id, request] of this.pending) {
       this.clearPending(id, request)
       request.reject(error)

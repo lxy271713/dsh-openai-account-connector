@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer'
 import { constants as fsConstants } from 'node:fs'
 import { lstat, mkdtemp, open, realpath, rm, type FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, sep } from 'node:path'
 import type {
   AttachmentStore, ImageAttachmentRef, ImageMediaType, SaveImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
@@ -113,6 +113,7 @@ export class OpenAIAccountAdapter extends LlmAdapter {
         approvalPolicy: 'never',
         serviceName: 'dsh_openai_account_connector',
         ephemeral: true,
+        config: { 'features.image_generation': supportsImages },
         dynamicTools: dynamicTools(options.tools),
         developerInstructions: 'Use DeepSeek Harness dynamic tools for external actions. Do not use built-in shell or filesystem tools. Use image generation only when the user requests an image.',
       }, signalOptions(options.signal))
@@ -232,7 +233,7 @@ export class OpenAIAccountAdapter extends LlmAdapter {
               throw new LlmError('OpenAI 图片生成没有返回可用产物', 'SERVER')
             }
             const attachment = await importGeneratedImage(
-              item.savedPath, cwd, this.attachments, generatedImages, options.signal,
+              item.savedPath, this.client.getCodexHome(), this.attachments, generatedImages, options.signal,
             )
             const index = nextIndex++
             emitted = true
@@ -386,26 +387,35 @@ function generatedImageBudget(attachments?: ConnectorAttachmentStore): Generated
 
 async function importGeneratedImage(
   savedPath: string,
-  cwd: string,
+  codexHome: string,
   attachments: ConnectorAttachmentStore | undefined,
   budget: GeneratedImageBudget,
   signal?: AbortSignal,
 ): Promise<ImageAttachmentRef> {
   signal?.throwIfAborted()
   if (!attachments) throw new LlmError('OpenAI 图片输出缺少 Harness 附件服务', 'UNSUPPORTED_CONTENT')
-  const declared = relative(cwd, savedPath)
-  if (!isAbsolute(savedPath) || declared === '' || isAbsolute(declared) || declared === '..' || declared.startsWith(`..${sep}`)) {
-    throw new LlmError('OpenAI 图片产物读取失败', 'SERVER')
-  }
+  if (!isAbsolute(savedPath)) throw new LlmError('OpenAI 图片产物读取失败', 'SERVER')
   let handle: FileHandle | undefined
   try {
-    const [canonicalRoot, canonicalPath, before] = await Promise.all([realpath(cwd), realpath(savedPath), lstat(savedPath)])
-    if (before.isSymbolicLink() || canonicalPath !== resolve(canonicalRoot, declared)) throw new Error('unsafe image path')
+    const imageRoot = join(codexHome, 'generated_images')
+    const [trustedRoot, rootStat, canonicalPath, before] = await Promise.all([
+      realpath(imageRoot), lstat(imageRoot), realpath(savedPath), lstat(savedPath),
+    ])
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error('unsafe image root')
+    const declared = relative(trustedRoot, canonicalPath)
+    if (declared === '' || isAbsolute(declared) || declared === '..' || declared.startsWith(`..${sep}`)) {
+      throw new Error('untrusted image path')
+    }
+    if (before.isSymbolicLink()) throw new Error('unsafe image path')
     handle = await open(canonicalPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
     const stat = await handle.stat()
-    if (stat.dev !== before.dev || stat.ino !== before.ino || !stat.isFile() || stat.size <= 0
+    if (stat.dev !== before.dev || stat.ino !== before.ino || stat.nlink !== 1 || !stat.isFile() || stat.size <= 0
       || stat.size > attachments.imageLimits.maxImageBytes) throw new Error('invalid image file')
-    const data = await handle.readFile()
+    const data = await readBounded(handle, stat.size, attachments.imageLimits.maxImageBytes)
+    const after = await handle.stat()
+    if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size || data.byteLength !== stat.size) {
+      throw new Error('image changed while reading')
+    }
     signal?.throwIfAborted()
     const mediaType = imageMediaType(data)
     if (!mediaType) throw new Error('unsupported image type')
@@ -425,6 +435,18 @@ async function importGeneratedImage(
   } finally {
     await handle?.close().catch(() => undefined)
   }
+}
+
+async function readBounded(handle: FileHandle, expectedBytes: number, maxBytes: number): Promise<Buffer> {
+  const data = Buffer.allocUnsafe(Math.min(expectedBytes, maxBytes) + 1)
+  let offset = 0
+  while (offset < data.byteLength) {
+    const { bytesRead } = await handle.read(data, offset, data.byteLength - offset, offset)
+    if (bytesRead === 0) break
+    offset += bytesRead
+  }
+  if (offset > expectedBytes || offset > maxBytes) throw new Error('image exceeds size limit')
+  return data.subarray(0, offset)
 }
 
 function imageMediaType(data: Uint8Array): ImageMediaType | null {

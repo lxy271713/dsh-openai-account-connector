@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -25,6 +25,9 @@ class FakeClient {
   rejectForcedRefresh = false
   toolRequest: { tool: string; arguments: unknown } | undefined
   toolResponse: Record<string, unknown> | undefined
+  codexHome = tmpdir()
+
+  getCodexHome(): string { return this.codexHome }
 
   subscribe(listener: (message: AppServerNotification) => void): () => void {
     this.listeners.add(listener)
@@ -188,6 +191,11 @@ describe('OpenAI account connector', () => {
   it('streams a generated image into the Harness attachment result', async () => {
     const client = new FakeClient()
     client.account = { type: 'chatgpt' }
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-home-'))
+    client.codexHome = codexHome
+    const providerOutput = join(codexHome, 'generated_images')
+    await mkdir(providerOutput)
+    client.generatedPath = join(providerOutput, 'generated.png')
     const limits: ImageAttachmentLimits = {
       maxImageBytes: 1024,
       maxImagesPerMessage: 4,
@@ -214,11 +222,15 @@ describe('OpenAI account connector', () => {
     }
     const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient, attachments)
     const chunks: StreamChunk[] = []
-    for await (const chunk of adapter.stream({
-      provider: PROVIDER_ID,
-      model: 'gpt-test',
-      messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成一张蓝色方块图片' }] })],
-    })) chunks.push(chunk)
+    try {
+      for await (const chunk of adapter.stream({
+        provider: PROVIDER_ID,
+        model: 'gpt-test',
+        messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成一张蓝色方块图片' }] })],
+      })) chunks.push(chunk)
+    } finally {
+      await rm(codexHome, { recursive: true, force: true })
+    }
 
     expect(chunks).toContainEqual(expect.objectContaining({
       type: 'block-end',
@@ -227,6 +239,9 @@ describe('OpenAI account connector', () => {
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
     expect(saved).toHaveLength(1)
     expect(saved[0]?.name).toBe('generated.png')
+    expect(client.requests.find(request => request.method === 'thread/start')?.params?.config).toEqual({
+      'features.image_generation': true,
+    })
     expect(JSON.stringify(client.requests.find(request => request.method === 'turn/start')?.params)).toContain('生成一张蓝色方块图片')
   })
 
@@ -312,12 +327,17 @@ describe('OpenAI account connector', () => {
     expect(modifyRecord).not.toHaveBeenCalled()
   })
 
-  it('rejects a generated path outside the isolated turn directory', async () => {
+  it('rejects a symlink returned as a generated image', async () => {
     const client = new FakeClient()
     client.account = { type: 'chatgpt' }
-    const outside = await mkdtemp(join(tmpdir(), 'dsh-openai-outside-'))
-    client.generatedPath = join(outside, 'outside.png')
-    await writeFile(client.generatedPath, PNG)
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-home-'))
+    client.codexHome = codexHome
+    const output = join(codexHome, 'generated_images')
+    await mkdir(output)
+    const target = join(output, 'target.png')
+    client.generatedPath = join(output, 'generated.png')
+    await writeFile(target, PNG)
+    await symlink(target, client.generatedPath)
     const saveImage = vi.fn()
     const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient, {
       imageLimits: {
@@ -337,6 +357,38 @@ describe('OpenAI account connector', () => {
       }).rejects.toThrow('图片产物读取失败')
       expect(saveImage).not.toHaveBeenCalled()
     } finally {
+      await rm(codexHome, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a generated image outside the runtime-owned image root', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-home-'))
+    client.codexHome = codexHome
+    await mkdir(join(codexHome, 'generated_images'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-openai-outside-'))
+    client.generatedPath = join(outside, 'outside.png')
+    const saveImage = vi.fn()
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient, {
+      imageLimits: {
+        maxImageBytes: 1024, maxImagesPerMessage: 4, maxMessageImageBytes: 4096,
+        maxImagePixels: 4_000_000, maxImageDimension: 4096, mediaTypes: ['image/png'],
+      },
+      readImageRequest: vi.fn(),
+      saveImage,
+    })
+    try {
+      await expect(async () => {
+        for await (const _chunk of adapter.stream({
+          provider: PROVIDER_ID,
+          model: 'gpt-test',
+          messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成图片' }] })],
+        })) { /* drain */ }
+      }).rejects.toThrow('图片产物读取失败')
+      expect(saveImage).not.toHaveBeenCalled()
+    } finally {
+      await rm(codexHome, { recursive: true, force: true })
       await rm(outside, { recursive: true, force: true })
     }
   })
