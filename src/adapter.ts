@@ -10,6 +10,7 @@ import {
   LlmAdapter,
   CallId,
   LlmError,
+  resolveRetryPolicy,
   type GenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
@@ -45,7 +46,12 @@ const IMAGE_CAPABILITY_TIMEOUT_MS = 2_000
 const MAX_REQUEST_IMAGE_BYTES = 1024 * 1024
 const MAX_REQUEST_IMAGE_PIXELS = 2048 * 2048
 const MAX_REQUEST_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
+const TURN_INTERRUPT_TIMEOUT_MS = 2_000
 const DSH_TOOL_NAMESPACE = 'dsh'
+const NO_WHOLE_TURN_RETRY = resolveRetryPolicy(
+  { mode: 'normal', maxRetries: 0 },
+  'dsh-openai-account-connector.retryPolicy',
+)
 
 /** DSH model adapter backed by the official account-owning Codex app-server. */
 export class OpenAIAccountAdapter extends LlmAdapter {
@@ -59,6 +65,11 @@ export class OpenAIAccountAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: 'OpenAI' }
+  }
+
+  override providerRetryPolicy(provider: string) {
+    assertProvider(provider)
+    return NO_WHOLE_TURN_RETRY
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
@@ -116,7 +127,7 @@ export class OpenAIAccountAdapter extends LlmAdapter {
         ephemeral: true,
         config: { 'features.image_generation': supportsImages },
         dynamicTools: dynamicTools(options.tools),
-        developerInstructions: 'Use DeepSeek Harness dynamic tools for external actions. For image requests, use built-in image generation directly; never use a Harness tool to load an image skill. Do not use built-in shell or filesystem tools. Use image generation only when the user requests an image.',
+        developerInstructions: 'Use DeepSeek Harness dynamic tools for external actions. For image requests, use built-in image generation directly; never use a Harness tool to load an image skill. Generate exactly one image per user request. Do not use built-in shell or filesystem tools. Use image generation only when the user requests an image.',
       }, signalOptions(options.signal))
       const threadId = started.thread?.id
       if (!threadId) throw new LlmError('OpenAI 账号运行时没有返回会话 ID', 'TRANSPORT')
@@ -248,6 +259,23 @@ export class OpenAIAccountAdapter extends LlmAdapter {
             if (item.status !== 'completed' || typeof item.savedPath !== 'string') {
               throw new LlmError('OpenAI 图片生成没有返回可用产物', 'SERVER')
             }
+            interrupting = this.client.request(
+              'turn/interrupt', { threadId, turnId },
+              { timeoutMs: TURN_INTERRUPT_TIMEOUT_MS, ...signalOptions(options.signal) },
+            )
+            try {
+              await interrupting
+            } catch (cause) {
+              if (options.signal?.aborted) {
+                yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'OpenAI 请求已取消' } } }
+                return
+              }
+              throw new LlmError('OpenAI 图片已完成，但无法确认后续生成已经停止', 'TRANSPORT', { cause })
+            }
+            if (options.signal?.aborted) {
+              yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'OpenAI 请求已取消' } } }
+              return
+            }
             const attachment = await importGeneratedImage(
               item.savedPath, this.client.getCodexHome(), this.attachments, generatedImages, options.signal,
             )
@@ -255,6 +283,8 @@ export class OpenAIAccountAdapter extends LlmAdapter {
             emitted = true
             yield { type: 'block-start', index, blockType: 'image' }
             yield { type: 'block-end', index, block: { type: 'image', attachment } }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+            return
           }
         }
         if (message.method !== 'turn/completed') continue
@@ -501,6 +531,8 @@ function assertProvider(provider: string): void {
 }
 
 function assertSupportedOptions(options: GenerateOptions): void {
+  if (options.purpose === 'session-title'
+    && options.temperature === undefined && options.stop === undefined) return
   if (options.temperature !== undefined || options.maxTokens !== undefined || options.stop !== undefined) {
     throw new LlmError('OpenAI 账号 Connector 不支持 temperature、maxTokens 或 stop 参数', 'INVALID_REQUEST')
   }

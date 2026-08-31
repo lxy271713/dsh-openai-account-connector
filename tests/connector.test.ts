@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { AttachmentId, type ImageAttachmentLimits, type SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { AuthorizationFlow, AuthorizationSession } from '@deepseek-ai/dsh-authorization'
-import { createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import { AppServerClient, type AppServerInboundRequest, type AppServerNotification } from '../src/app-server.ts'
 import { OpenAIAccountAdapter } from '../src/adapter.ts'
@@ -20,9 +20,14 @@ class FakeClient {
   cwd = ''
   authUrl = 'https://auth.openai.com/authorize'
   generatedPath: string | undefined
+  additionalGeneratedPath: string | undefined
+  textOutput: string | undefined
   completeLogin = true
   completedAccount: unknown = { type: 'chatgpt' }
   rejectForcedRefresh = false
+  rejectInterrupt = false
+  turnInterrupted = false
+  secondImageGenerated = false
   toolRequest: { namespace?: unknown; tool: string; arguments: unknown } | undefined
   toolResponse: Record<string, unknown> | undefined
   toolResponses: Array<Record<string, unknown>> = []
@@ -109,6 +114,21 @@ class FakeClient {
         }, 0)
         return { turn: { id: 'turn-1' } } as T
       }
+      if (this.textOutput !== undefined) {
+        queueMicrotask(() => {
+          this.emit('item/agentMessage/delta', {
+            threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: this.textOutput,
+          })
+          this.emit('item/completed', {
+            threadId: 'thread-1', turnId: 'turn-1',
+            item: { id: 'message-1', type: 'agentMessage', text: this.textOutput },
+          })
+          this.emit('turn/completed', {
+            threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
+          })
+        })
+        return { turn: { id: 'turn-1' } } as T
+      }
       const savedPath = this.generatedPath ?? join(this.cwd, 'generated.png')
       await writeFile(savedPath, PNG)
       queueMicrotask(() => {
@@ -116,13 +136,37 @@ class FakeClient {
           threadId: 'thread-1', turnId: 'turn-1',
           item: { id: 'image-1', type: 'imageGeneration', status: 'completed', savedPath },
         })
-        this.emit('turn/completed', {
-          threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
-        })
       })
+      setTimeout(() => {
+        if (this.turnInterrupted) return
+        if (this.additionalGeneratedPath === undefined) {
+          this.emit('turn/completed', {
+            threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
+          })
+          return
+        }
+        this.secondImageGenerated = true
+        void writeFile(this.additionalGeneratedPath, PNG).then(() => {
+          this.emit('item/completed', {
+            threadId: 'thread-1', turnId: 'turn-1',
+            item: {
+              id: 'image-2', type: 'imageGeneration', status: 'completed',
+              savedPath: this.additionalGeneratedPath,
+            },
+          })
+          this.emit('turn/completed', {
+            threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
+          })
+        })
+      }, 0)
       return { turn: { id: 'turn-1' } } as T
     }
-    if (method === 'turn/interrupt' || method === 'account/login/cancel') return {} as T
+    if (method === 'turn/interrupt') {
+      if (this.rejectInterrupt) throw new Error('interrupt unavailable')
+      this.turnInterrupted = true
+      return {} as T
+    }
+    if (method === 'account/login/cancel') return {} as T
     throw new Error(`unexpected request: ${method}`)
   }
 
@@ -222,6 +266,7 @@ describe('OpenAI account connector', () => {
     const providerOutput = join(codexHome, 'generated_images')
     await mkdir(providerOutput)
     client.generatedPath = join(providerOutput, 'generated.png')
+    client.additionalGeneratedPath = join(providerOutput, 'second.png')
     const limits: ImageAttachmentLimits = {
       maxImageBytes: 1024,
       maxImagesPerMessage: 4,
@@ -254,6 +299,7 @@ describe('OpenAI account connector', () => {
         model: 'gpt-test',
         messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成一张蓝色方块图片' }] })],
       })) chunks.push(chunk)
+      await new Promise(resolve => setTimeout(resolve, 10))
     } finally {
       await rm(codexHome, { recursive: true, force: true })
     }
@@ -264,11 +310,58 @@ describe('OpenAI account connector', () => {
     }))
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
     expect(saved).toHaveLength(1)
+    expect(client.secondImageGenerated).toBe(false)
     expect(saved[0]?.name).toBe('generated.png')
+    expect(client.requests.filter(request => request.method === 'turn/interrupt')).toEqual([{
+      method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' },
+    }])
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.config).toEqual({
       'features.image_generation': true,
     })
     expect(JSON.stringify(client.requests.find(request => request.method === 'turn/start')?.params)).toContain('生成一张蓝色方块图片')
+  })
+
+  it('fails closed when the runtime cannot stop after the first generated image', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.rejectInterrupt = true
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-home-'))
+    client.codexHome = codexHome
+    const providerOutput = join(codexHome, 'generated_images')
+    await mkdir(providerOutput)
+    client.generatedPath = join(providerOutput, 'generated.png')
+    client.additionalGeneratedPath = join(providerOutput, 'second.png')
+    const saveImage = vi.fn(async (input: SaveImageAttachment) => ({
+      attachmentId: AttachmentId(`sha256:${'c'.repeat(64)}`),
+      mediaType: 'image/png' as const,
+      bytes: input.data.byteLength,
+      width: 1,
+      height: 1,
+    }))
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient, {
+      imageLimits: {
+        maxImageBytes: 1024, maxImagesPerMessage: 4, maxMessageImageBytes: 4096,
+        maxImagePixels: 4_000_000, maxImageDimension: 4096, mediaTypes: ['image/png'],
+      },
+      readImageRequest: vi.fn(),
+      saveImage,
+    })
+    try {
+      await expect(async () => {
+        for await (const _chunk of adapter.stream({
+          provider: PROVIDER_ID,
+          model: 'gpt-test',
+          messages: [createUserMessage({
+            source: { kind: 'user' }, content: [{ type: 'text', text: '生成图片' }],
+          })],
+        })) { /* drain */ }
+      }).rejects.toThrow('无法确认后续生成已经停止')
+      await new Promise(resolve => setTimeout(resolve, 10))
+    } finally {
+      await rm(codexHome, { recursive: true, force: true })
+    }
+    expect(saveImage).not.toHaveBeenCalled()
+    expect(client.secondImageGenerated).toBe(true)
   })
 
   it('redirects one unavailable skill call so native image generation can continue', async () => {
@@ -322,7 +415,7 @@ describe('OpenAI account connector', () => {
       type: 'block-end', block: expect.objectContaining({ type: 'image' }),
     }))
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
-    expect(client.requests).not.toContainEqual({
+    expect(client.requests).toContainEqual({
       method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' },
     })
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.dynamicTools).toEqual([{
@@ -420,6 +513,52 @@ describe('OpenAI account connector', () => {
       })) { /* drain */ }
     }).rejects.toThrow('不支持 temperature')
     expect(client.requests).toHaveLength(0)
+  })
+
+  it.each([
+    { label: 'maxTokens', controls: { maxTokens: 64 } },
+    { label: 'stop', controls: { stop: ['END'] } },
+    { label: 'compaction maxTokens', controls: { purpose: 'compaction', maxTokens: 64 } },
+    { label: 'session-title temperature', controls: { purpose: 'session-title', temperature: 0.2 } },
+  ] satisfies Array<{ label: string; controls: Partial<GenerateOptions> }>)('rejects unsupported $label controls', async ({ controls }) => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    await expect(async () => {
+      for await (const _chunk of adapter.stream({
+        provider: PROVIDER_ID, model: 'gpt-test', messages: [], ...controls,
+      })) { /* drain */ }
+    }).rejects.toThrow('不支持 temperature')
+    expect(client.requests).toHaveLength(0)
+  })
+
+  it('accepts session-title limits without forwarding unsupported controls', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.textOutput = '简短标题'
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model: 'gpt-test',
+      messages: [],
+      purpose: 'session-title',
+      maxTokens: 64,
+    })) chunks.push(chunk)
+    expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: '简短标题' })
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(client.requests.some(request => request.method === 'modelProvider/capabilities/read')).toBe(false)
+    const turnStart = client.requests.find(request => request.method === 'turn/start')
+    expect(turnStart?.params).not.toHaveProperty('temperature')
+    expect(turnStart?.params).not.toHaveProperty('maxTokens')
+    expect(turnStart?.params).not.toHaveProperty('stop')
+  })
+
+  it('disables whole-turn retries until app-server exposes a stable creation id', () => {
+    const adapter = new OpenAIAccountAdapter(new FakeClient() as unknown as AppServerClient)
+    expect(adapter.providerRetryPolicy(PROVIDER_ID)).toEqual(expect.objectContaining({
+      mode: 'normal', maxRetries: 0,
+    }))
   })
 
   it('rejects non-official login URLs before showing them or committing a connection', async () => {

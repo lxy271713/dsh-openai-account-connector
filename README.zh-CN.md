@@ -39,6 +39,6 @@ pnpm pack:check
 ## 当前限制
 
 - app-server 图片完成事件和动态工具目前属于实验协议；Connector 读取 live 图片能力，并对字段变化 fail-closed。
-- app-server 协议不提供 DSH 的 `temperature`、`maxTokens`、`stop` 控制；设置这些参数的请求会明确失败。
+- app-server 协议不提供 DSH 的 `temperature`、`maxTokens`、`stop` 控制；普通对话设置这些参数会明确失败。会话标题的 `maxTokens` 提示可以接收，但不会转发。图片回合只有在运行时确认中断成功后才发布第一张完成图片。由于 app-server 没有稳定的图片创建 ID，本 Provider 路线的文本、标题和图片请求都禁用整轮自动重试；瞬时故障会直接显示给用户。
 - Harness 附件服务没有事务 staging。图片保存成功后若调用随即取消，可能留下一个未被会话引用的内容寻址对象，由附件保留策略后续处理。
 - 当前包只实现 OpenAI 专用 Connector。豆包、千问、Kimi、GLM、xAI 必须各自提供独立 Connector；不得在账号 UI 中加入 Provider 名称分支。
