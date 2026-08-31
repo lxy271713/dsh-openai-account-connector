@@ -245,28 +245,28 @@ describe('OpenAI account connector', () => {
     expect(JSON.stringify(client.requests.find(request => request.method === 'turn/start')?.params)).toContain('生成一张蓝色方块图片')
   })
 
-  it('returns a DSH tool call instead of executing it inside app-server', async () => {
+  it('namespaces a colliding DSH tool and restores its Harness name', async () => {
     const client = new FakeClient()
     client.account = { type: 'chatgpt' }
-    client.toolRequest = { tool: 'read_workspace', arguments: { path: 'README.md' } }
+    client.toolRequest = { tool: 'dsh__skill', arguments: { name: 'imagegen' } }
     const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
     const chunks: StreamChunk[] = []
     for await (const chunk of adapter.stream({
       provider: PROVIDER_ID,
       model: 'gpt-test',
-      messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '读取 README' }] })],
-      tools: [{ name: 'read_workspace', description: 'Read a workspace file', parameters: { type: 'object' } }],
+      messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成图片' }] })],
+      tools: [{ name: 'skill', description: 'Load a Harness skill', parameters: { type: 'object' } }],
     })) chunks.push(chunk)
     expect(chunks).toContainEqual(expect.objectContaining({
       type: 'block-end',
-      block: { type: 'tool-call', id: 'call-1', name: 'read_workspace', arguments: '{"path":"README.md"}' },
+      block: { type: 'tool-call', id: 'call-1', name: 'skill', arguments: '{"name":"imagegen"}' },
     }))
     expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'tool-calls' } })
     expect(client.requests).toContainEqual({
       method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' },
     })
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.dynamicTools).toEqual([{
-      type: 'function', name: 'read_workspace', description: 'Read a workspace file',
+      type: 'function', name: 'dsh__skill', description: 'Load a Harness skill',
       inputSchema: { type: 'object' },
     }])
     expect(client.toolResponse).toEqual({

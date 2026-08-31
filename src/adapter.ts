@@ -45,6 +45,7 @@ const IMAGE_CAPABILITY_TIMEOUT_MS = 2_000
 const MAX_REQUEST_IMAGE_BYTES = 1024 * 1024
 const MAX_REQUEST_IMAGE_PIXELS = 2048 * 2048
 const MAX_REQUEST_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
+const DSH_TOOL_PREFIX = 'dsh__'
 
 /** DSH model adapter backed by the official account-owning Codex app-server. */
 export class OpenAIAccountAdapter extends LlmAdapter {
@@ -497,7 +498,7 @@ function signalOptions(signal?: AbortSignal): { signal?: AbortSignal } {
 function dynamicTools(tools: readonly ToolSchema[] | undefined): Array<Record<string, unknown>> {
   return (tools ?? []).map(tool => ({
     type: 'function',
-    name: tool.name,
+    name: `${DSH_TOOL_PREFIX}${tool.name}`,
     description: tool.description,
     inputSchema: tool.parameters,
   }))
@@ -508,8 +509,11 @@ function parseToolCall(
   tools: readonly ToolSchema[] | undefined,
 ): { callId: string; tool: string; argumentsText: string } {
   const { params } = request
+  const tool = typeof params.tool === 'string'
+    ? tools?.find(candidate => `${DSH_TOOL_PREFIX}${candidate.name}` === params.tool)
+    : undefined
   if (typeof params.callId !== 'string' || params.callId.length === 0
-    || typeof params.tool !== 'string' || !tools?.some(tool => tool.name === params.tool)
+    || tool === undefined
     || !isRecord(params.arguments)) {
     throw new LlmError('OpenAI 账号运行时返回了未知工具调用', 'TRANSPORT')
   }
@@ -517,7 +521,7 @@ function parseToolCall(
   try { argumentsText = JSON.stringify(params.arguments) }
   catch { throw new LlmError('OpenAI 工具参数无法序列化', 'TRANSPORT') }
   if (argumentsText === undefined) throw new LlmError('OpenAI 工具参数无效', 'TRANSPORT')
-  return { callId: params.callId, tool: params.tool, argumentsText }
+  return { callId: params.callId, tool: tool.name, argumentsText }
 }
 
 function appendInput(target: CodexUserInput[], values: readonly CodexUserInput[]): void {
