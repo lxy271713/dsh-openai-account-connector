@@ -116,7 +116,7 @@ export class OpenAIAccountAdapter extends LlmAdapter {
         ephemeral: true,
         config: { 'features.image_generation': supportsImages },
         dynamicTools: dynamicTools(options.tools),
-        developerInstructions: 'Use DeepSeek Harness dynamic tools for external actions. Do not use built-in shell or filesystem tools. Use image generation only when the user requests an image.',
+        developerInstructions: 'Use DeepSeek Harness dynamic tools for external actions. For image requests, use built-in image generation directly; never use a Harness tool to load an image skill. Do not use built-in shell or filesystem tools. Use image generation only when the user requests an image.',
       }, signalOptions(options.signal))
       const threadId = started.thread?.id
       if (!threadId) throw new LlmError('OpenAI 账号运行时没有返回会话 ID', 'TRANSPORT')

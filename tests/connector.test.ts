@@ -279,6 +279,9 @@ describe('OpenAI account connector', () => {
         type: 'function', name: 'skill', description: 'Load a Harness skill', inputSchema: { type: 'object' },
       }],
     }])
+    expect(client.requests.find(request => request.method === 'thread/start')?.params?.developerInstructions).toContain(
+      'For image requests, use built-in image generation directly; never use a Harness tool to load an image skill.',
+    )
     expect(client.toolResponse).toEqual({
       success: false,
       contentItems: [{ type: 'inputText', text: 'Tool execution is delegated to DeepSeek Harness.' }],
