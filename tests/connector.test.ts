@@ -23,8 +23,9 @@ class FakeClient {
   completeLogin = true
   completedAccount: unknown = { type: 'chatgpt' }
   rejectForcedRefresh = false
-  toolRequest: { tool: string; arguments: unknown } | undefined
+  toolRequest: { namespace?: unknown; tool: string; arguments: unknown } | undefined
   toolResponse: Record<string, unknown> | undefined
+  toolHandlerError: unknown
   codexHome = tmpdir()
 
   getCodexHome(): string { return this.codexHome }
@@ -69,16 +70,24 @@ class FakeClient {
     if (method === 'turn/start') {
       if (this.toolRequest) {
         setTimeout(() => {
-          for (const listener of this.requestListeners) {
-            if (listener({
-              id: 44,
-              method: 'item/tool/call',
-              params: {
-                threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1',
-                tool: this.toolRequest!.tool, arguments: this.toolRequest!.arguments,
-              },
-              respond: result => { this.toolResponse = result },
-            })) break
+          try {
+            for (const listener of this.requestListeners) {
+              if (listener({
+                id: 44,
+                method: 'item/tool/call',
+                params: {
+                  threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1',
+                  namespace: this.toolRequest!.namespace,
+                  tool: this.toolRequest!.tool, arguments: this.toolRequest!.arguments,
+                },
+                respond: result => { this.toolResponse = result },
+              })) break
+            }
+          } catch (error) {
+            this.toolHandlerError = error
+            this.emit('turn/completed', {
+              threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
+            })
           }
         }, 0)
         return { turn: { id: 'turn-1' } } as T
@@ -248,7 +257,7 @@ describe('OpenAI account connector', () => {
   it('namespaces a colliding DSH tool and restores its Harness name', async () => {
     const client = new FakeClient()
     client.account = { type: 'chatgpt' }
-    client.toolRequest = { tool: 'dsh__skill', arguments: { name: 'imagegen' } }
+    client.toolRequest = { namespace: 'dsh', tool: 'skill', arguments: { name: 'imagegen' } }
     const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
     const chunks: StreamChunk[] = []
     for await (const chunk of adapter.stream({
@@ -266,13 +275,53 @@ describe('OpenAI account connector', () => {
       method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' },
     })
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.dynamicTools).toEqual([{
-      type: 'function', name: 'dsh__skill', description: 'Load a Harness skill',
-      inputSchema: { type: 'object' },
+      type: 'namespace', name: 'dsh', description: 'DeepSeek Harness tools', tools: [{
+        type: 'function', name: 'skill', description: 'Load a Harness skill', inputSchema: { type: 'object' },
+      }],
     }])
     expect(client.toolResponse).toEqual({
       success: false,
       contentItems: [{ type: 'inputText', text: 'Tool execution is delegated to DeepSeek Harness.' }],
     })
+  })
+
+  it('preserves a maximum-length Harness tool name inside the namespace', async () => {
+    const name = 'x'.repeat(128)
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.toolRequest = { namespace: 'dsh', tool: name, arguments: {} }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model: 'gpt-test',
+      messages: [],
+      tools: [{ name, description: 'Boundary tool', parameters: { type: 'object' } }],
+    })) chunks.push(chunk)
+    expect(chunks).toContainEqual(expect.objectContaining({
+      type: 'block-end', block: expect.objectContaining({ type: 'tool-call', name }),
+    }))
+    expect(JSON.stringify(client.requests.find(request => request.method === 'thread/start')?.params?.dynamicTools)).not.toContain('dsh__')
+  })
+
+  it('rejects a tool call from the wrong namespace', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.toolRequest = { namespace: 'other', tool: 'skill', arguments: {} }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model: 'gpt-test',
+      messages: [],
+      tools: [{ name: 'skill', description: 'Load a Harness skill', parameters: { type: 'object' } }],
+    })) chunks.push(chunk)
+    expect(client.toolHandlerError).toEqual(expect.objectContaining({
+      message: 'OpenAI 账号运行时返回了未知工具调用',
+    }))
+    expect(chunks).not.toContainEqual(expect.objectContaining({
+      type: 'block-end', block: expect.objectContaining({ type: 'tool-call' }),
+    }))
   })
 
   it('fails closed on unsupported generation controls', async () => {
