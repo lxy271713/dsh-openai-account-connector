@@ -531,8 +531,6 @@ function assertProvider(provider: string): void {
 }
 
 function assertSupportedOptions(options: GenerateOptions): void {
-  if (options.purpose === 'session-title'
-    && options.temperature === undefined && options.stop === undefined) return
   if (options.temperature !== undefined || options.maxTokens !== undefined || options.stop !== undefined) {
     throw new LlmError('OpenAI 账号 Connector 不支持 temperature、maxTokens 或 stop 参数', 'INVALID_REQUEST')
   }

@@ -21,7 +21,6 @@ class FakeClient {
   authUrl = 'https://auth.openai.com/authorize'
   generatedPath: string | undefined
   additionalGeneratedPath: string | undefined
-  textOutput: string | undefined
   completeLogin = true
   completedAccount: unknown = { type: 'chatgpt' }
   rejectForcedRefresh = false
@@ -112,21 +111,6 @@ class FakeClient {
             })
           }
         }, 0)
-        return { turn: { id: 'turn-1' } } as T
-      }
-      if (this.textOutput !== undefined) {
-        queueMicrotask(() => {
-          this.emit('item/agentMessage/delta', {
-            threadId: 'thread-1', turnId: 'turn-1', itemId: 'message-1', delta: this.textOutput,
-          })
-          this.emit('item/completed', {
-            threadId: 'thread-1', turnId: 'turn-1',
-            item: { id: 'message-1', type: 'agentMessage', text: this.textOutput },
-          })
-          this.emit('turn/completed', {
-            threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
-          })
-        })
         return { turn: { id: 'turn-1' } } as T
       }
       const savedPath = this.generatedPath ?? join(this.cwd, 'generated.png')
@@ -519,6 +503,7 @@ describe('OpenAI account connector', () => {
     { label: 'maxTokens', controls: { maxTokens: 64 } },
     { label: 'stop', controls: { stop: ['END'] } },
     { label: 'compaction maxTokens', controls: { purpose: 'compaction', maxTokens: 64 } },
+    { label: 'session-title maxTokens', controls: { purpose: 'session-title', maxTokens: 64 } },
     { label: 'session-title temperature', controls: { purpose: 'session-title', temperature: 0.2 } },
   ] satisfies Array<{ label: string; controls: Partial<GenerateOptions> }>)('rejects unsupported $label controls', async ({ controls }) => {
     const client = new FakeClient()
@@ -530,28 +515,6 @@ describe('OpenAI account connector', () => {
       })) { /* drain */ }
     }).rejects.toThrow('不支持 temperature')
     expect(client.requests).toHaveLength(0)
-  })
-
-  it('accepts session-title limits without forwarding unsupported controls', async () => {
-    const client = new FakeClient()
-    client.account = { type: 'chatgpt' }
-    client.textOutput = '简短标题'
-    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
-    const chunks: StreamChunk[] = []
-    for await (const chunk of adapter.stream({
-      provider: PROVIDER_ID,
-      model: 'gpt-test',
-      messages: [],
-      purpose: 'session-title',
-      maxTokens: 64,
-    })) chunks.push(chunk)
-    expect(chunks).toContainEqual({ type: 'text-delta', index: 0, text: '简短标题' })
-    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
-    expect(client.requests.some(request => request.method === 'modelProvider/capabilities/read')).toBe(false)
-    const turnStart = client.requests.find(request => request.method === 'turn/start')
-    expect(turnStart?.params).not.toHaveProperty('temperature')
-    expect(turnStart?.params).not.toHaveProperty('maxTokens')
-    expect(turnStart?.params).not.toHaveProperty('stop')
   })
 
   it('disables whole-turn retries until app-server exposes a stable creation id', () => {
