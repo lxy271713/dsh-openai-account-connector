@@ -6,7 +6,7 @@
 
 ## 安装
 
-该版本要求 DSH Desktop 2.0.3 包含 Harness `732a504` 之后的授权目标契约，并支持 `llm-pi-ai.delegatedProviders`。先安装一次 Provider-neutral 的 [`dsh-account-authorization`](https://github.com/lxy271713/dsh-account-authorization) 账号入口，再安装本 Provider Connector：
+该版本可在正式 DSH Desktop 2.0.3 上运行，由 `dsh-account-authorization@0.1.0` 提供保留授权目标的兼容层；后续 Harness 版本也可原生包含 `732a504` 之后的同等授权目标契约。同时需要支持 `llm-pi-ai.delegatedProviders`。先安装一次 Provider-neutral 的 [`dsh-account-authorization`](https://github.com/lxy271713/dsh-account-authorization) 账号入口，再安装本 Provider Connector：
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
@@ -20,7 +20,7 @@ dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.0
 - “连接账号”调用官方 app-server 浏览器登录；若 Codex 已登录，只验证账号并建立 DSH 连接标记。
 - Connector 不读取 Token。Token 的持久化与刷新完全由官方 app-server 管理。
 - “断开连接”删除 DSH 的连接标记并撤下模型路线，不会替用户退出其他 Codex 客户端。
-- 每次模型调用使用独立临时工作目录，不获得项目目录的隐式写权限。
+- 每次模型调用使用独立临时执行目录；生成图片只从官方运行时声明的 `generated_images` 根目录导入，不获得项目目录的隐式写权限。
 - DSH 原生工具会映射为 app-server 动态工具；工具调用返回 Harness Agent 循环，并继续受 DSH 当前权限策略约束。
 - app-server 未声明图片能力、返回越界路径、符号链接、空文件、超限文件或未知格式时，整次图片输出失败且不发布图片消息。
 

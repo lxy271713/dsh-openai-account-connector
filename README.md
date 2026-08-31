@@ -6,7 +6,7 @@ After connection, the Connector registers the `openai-codex` route in `ctx.llm`.
 
 ## Requirements and installation
 
-This release requires DSH Desktop 2.0.3 with the authorization-target work after Harness commit `732a504` and `llm-pi-ai.delegatedProviders`. Install the Provider-neutral account surface once, then install this Provider-specific Connector:
+This release supports formal DSH Desktop 2.0.3 when `dsh-account-authorization@0.1.0` supplies the target-preserving authorization compatibility layer. Later Harness builds may provide the same contract natively through the authorization-target work after commit `732a504`. `llm-pi-ai.delegatedProviders` is also required. Install the Provider-neutral account surface once, then install this Provider-specific Connector:
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
@@ -21,7 +21,7 @@ The account-surface bundle owns the Harness authorization registry and shared UI
 - Harness credentials store only a non-secret connected marker.
 - Harness `ctx.llm` remains the only Provider/model directory.
 - Harness attachments own generated image bytes and replay references.
-- Each request runs in a new temporary workspace; the Connector does not grant implicit writes to the user's project.
+- Each request runs in a new temporary execution workspace; generated images are imported only from the official runtime's declared `generated_images` root, so the Connector does not grant implicit writes to the user's project.
 - DSH native tool schemas are exposed as app-server dynamic tools; calls return to the Harness agent loop for execution under the selected DSH permission policy.
 - Disconnecting removes only the DSH connection and route. It does not sign the user out of other Codex clients.
 

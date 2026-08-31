@@ -8,7 +8,7 @@ Harness credentials contain only an ambient connection marker. Removing that mar
 
 ## Generated files
 
-Each request receives a fresh temporary workspace. A generated result is accepted only when its declared and canonical path remain inside that workspace, the source is a non-symlink regular file, an `O_NOFOLLOW` handle still names the same inode, bytes fit Harness limits, and magic bytes identify an allowed raster format. The temporary workspace is removed after the stream settles.
+Each request receives a fresh temporary execution workspace, which is removed after the stream settles. The official app-server stores generated images under the `generated_images` directory inside the absolute runtime data root returned by its initialize handshake. A generated result is accepted only when its declared and canonical path remain inside that trusted directory, the directory and source are not symlinks, an `O_NOFOLLOW` handle still names the same single-link regular-file inode, bytes fit Harness limits, and magic bytes identify an allowed raster format. Accepted bytes are copied into Harness attachments; the Connector does not delete the official runtime's generated file.
 
 ## Reporting
 
