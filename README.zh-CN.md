@@ -6,14 +6,14 @@
 
 ## 安装
 
-该 alpha 版本需要包含 Harness `732a504` 之后授权目标契约、并支持 `llm-pi-ai.delegatedProviders` 的 DSH 构建。它与 Provider-neutral 的 [`dsh-account-authorization`](https://github.com/lxy271713/dsh-account-authorization) UI 配合使用：UI 只展示 Flow，本插件拥有 OpenAI 协议和模型 Adapter。
+该版本要求 DSH Desktop 2.0.3 包含 Harness `732a504` 之后的授权目标契约，并支持 `llm-pi-ai.delegatedProviders`。先安装一次 Provider-neutral 的 [`dsh-account-authorization`](https://github.com/lxy271713/dsh-account-authorization) 账号入口，再安装本 Provider Connector：
 
 ```sh
-dsh plugin --profile desktop add dsh-account-authorization
-dsh plugin --profile desktop add dsh-openai-account-connector
+dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.0
 ```
 
-安装 bundle 会让专用 Connector 单独接管 `openai-codex`，避免通用 pi-ai Adapter 和专用 Adapter 同时成为同一路线的所有者。Provider 名称只存在于本专用 Connector 和 bundle 配置中；账号 UI、Bridge 和 Harness 核心没有 OpenAI 分支。
+账号入口 bundle 独占 Harness authorization registry 和通用 UI；本 bundle 只拥有 OpenAI Flow 与 Adapter，并让它单独接管 `openai-codex`，避免通用 pi-ai Adapter 和专用 Adapter 同时成为同一路线的所有者。卸载本 Connector 不会移除其他 Provider 的账号入口。Provider 名称只存在于本专用 Connector 和 bundle 配置中；账号 UI、Bridge 和 Harness 核心没有 OpenAI 分支。
 
 ## 行为
 

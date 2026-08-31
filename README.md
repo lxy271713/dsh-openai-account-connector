@@ -6,14 +6,14 @@ After connection, the Connector registers the `openai-codex` route in `ctx.llm`.
 
 ## Requirements and installation
 
-This alpha requires a DSH build containing the authorization-target work after Harness commit `732a504` and `llm-pi-ai.delegatedProviders`. Install it with the Provider-neutral `dsh-account-authorization` UI:
+This release requires DSH Desktop 2.0.3 with the authorization-target work after Harness commit `732a504` and `llm-pi-ai.delegatedProviders`. Install the Provider-neutral account surface once, then install this Provider-specific Connector:
 
 ```sh
-dsh plugin --profile desktop add dsh-account-authorization
-dsh plugin --profile desktop add dsh-openai-account-connector
+dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.0
 ```
 
-The bundle assigns `openai-codex` to this specialized Connector so the generic pi-ai adapter and this adapter never own the same route.
+The account-surface bundle owns the Harness authorization registry and shared UI. This Connector bundle owns only the OpenAI flow and adapter, and assigns `openai-codex` to that adapter so the generic pi-ai adapter and this adapter never own the same route. Removing this Connector therefore cannot remove another Provider's account surface.
 
 ## Security and state ownership
 

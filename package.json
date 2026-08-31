@@ -1,6 +1,6 @@
 {
   "name": "dsh-openai-account-connector",
-  "version": "0.1.0-alpha.6",
+  "version": "0.1.0",
   "description": "Official OpenAI account model connector for DeepSeek Harness",
   "type": "module",
   "main": "lib/index.js",
@@ -42,6 +42,17 @@
     "image-generation"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lxy271713/dsh-openai-account-connector.git"
+  },
+  "homepage": "https://github.com/lxy271713/dsh-openai-account-connector#readme",
+  "bugs": {
+    "url": "https://github.com/lxy271713/dsh-openai-account-connector/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",
     "@deepseek-ai/dsh-attachment": "0.1.1-rc.2",
