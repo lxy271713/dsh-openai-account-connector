@@ -136,6 +136,8 @@ export class OpenAIAccountAdapter extends LlmAdapter {
     const notifications = new NotificationQueue()
     let turnId: string | null = null
     let toolCallClaimed = false
+    let unavailableSkillRedirected = false
+    const availableSkills = availableSkillNames(options.messages)
     const unsubscribe = this.client.subscribe(message => {
       if (message.params.threadId === threadId) notifications.push(message)
     })
@@ -143,6 +145,19 @@ export class OpenAIAccountAdapter extends LlmAdapter {
       if (request.method !== 'item/tool/call' || request.params.threadId !== threadId
         || request.params.turnId !== turnId || toolCallClaimed) return false
       const tool = parseToolCall(request, options.tools)
+      if (!unavailableSkillRedirected && tool.tool === 'skill'
+        && isRecord(request.params.arguments) && typeof request.params.arguments.name === 'string'
+        && !availableSkills.has(request.params.arguments.name)) {
+        unavailableSkillRedirected = true
+        request.respond({
+          success: false,
+          contentItems: [{
+            type: 'inputText',
+            text: 'This Harness skill is unavailable. Do not retry it. Use a suitable built-in tool directly if one matches the user request; otherwise answer without it.',
+          }],
+        })
+        return true
+      }
       toolCallClaimed = true
       request.respond({
         success: false,
@@ -508,6 +523,19 @@ function dynamicTools(tools: readonly ToolSchema[] | undefined): Array<Record<st
       inputSchema: tool.parameters,
     })),
   }]
+}
+
+function availableSkillNames(messages: GenerateOptions['messages']): Set<string> {
+  let names = new Set<string>()
+  for (const message of messages) {
+    const source: unknown = message.source
+    if (!isRecord(source) || source.kind !== 'skill-catalog' || !Array.isArray(source.entries)) continue
+    names = new Set<string>()
+    for (const entry of source.entries) {
+      if (isRecord(entry) && typeof entry.name === 'string') names.add(entry.name)
+    }
+  }
+  return names
 }
 
 function parseToolCall(

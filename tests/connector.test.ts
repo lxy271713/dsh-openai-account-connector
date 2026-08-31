@@ -25,6 +25,8 @@ class FakeClient {
   rejectForcedRefresh = false
   toolRequest: { namespace?: unknown; tool: string; arguments: unknown } | undefined
   toolResponse: Record<string, unknown> | undefined
+  toolResponses: Array<Record<string, unknown>> = []
+  generateAfterToolResponse = false
   toolHandlerError: unknown
   codexHome = tmpdir()
 
@@ -80,7 +82,22 @@ class FakeClient {
                   namespace: this.toolRequest!.namespace,
                   tool: this.toolRequest!.tool, arguments: this.toolRequest!.arguments,
                 },
-                respond: result => { this.toolResponse = result },
+                respond: result => {
+                  this.toolResponse = result
+                  this.toolResponses.push(result)
+                  if (this.generateAfterToolResponse) {
+                    const savedPath = this.generatedPath ?? join(this.cwd, 'generated.png')
+                    void writeFile(savedPath, PNG).then(() => {
+                      this.emit('item/completed', {
+                        threadId: 'thread-1', turnId: 'turn-1',
+                        item: { id: 'image-1', type: 'imageGeneration', status: 'completed', savedPath },
+                      })
+                      this.emit('turn/completed', {
+                        threadId: 'thread-1', turnId: 'turn-1', turn: { id: 'turn-1', status: 'completed' },
+                      })
+                    })
+                  }
+                },
               })) break
             }
           } catch (error) {
@@ -254,24 +271,58 @@ describe('OpenAI account connector', () => {
     expect(JSON.stringify(client.requests.find(request => request.method === 'turn/start')?.params)).toContain('生成一张蓝色方块图片')
   })
 
-  it('namespaces a colliding DSH tool and restores its Harness name', async () => {
+  it('redirects one unavailable skill call so native image generation can continue', async () => {
     const client = new FakeClient()
     client.account = { type: 'chatgpt' }
     client.toolRequest = { namespace: 'dsh', tool: 'skill', arguments: { name: 'imagegen' } }
-    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    client.generateAfterToolResponse = true
+    const codexHome = await mkdtemp(join(tmpdir(), 'codex-home-'))
+    client.codexHome = codexHome
+    await mkdir(join(codexHome, 'generated_images'))
+    client.generatedPath = join(codexHome, 'generated_images', 'redirected.png')
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient, {
+      imageLimits: {
+        maxImageBytes: 1024, maxImagesPerMessage: 4, maxMessageImageBytes: 4096,
+        maxImagePixels: 4_000_000, maxImageDimension: 4096, mediaTypes: ['image/png'],
+      },
+      readImageRequest: vi.fn(),
+      saveImage: vi.fn(async input => ({
+        attachmentId: AttachmentId(`sha256:${'b'.repeat(64)}`),
+        mediaType: 'image/png' as const, bytes: input.data.byteLength, width: 1, height: 1,
+      })),
+    })
     const chunks: StreamChunk[] = []
-    for await (const chunk of adapter.stream({
-      provider: PROVIDER_ID,
-      model: 'gpt-test',
-      messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成图片' }] })],
-      tools: [{ name: 'skill', description: 'Load a Harness skill', parameters: { type: 'object' } }],
-    })) chunks.push(chunk)
+    try {
+      for await (const chunk of adapter.stream({
+        provider: PROVIDER_ID,
+        model: 'gpt-test',
+        messages: [
+          createUserMessage({
+            source: {
+              kind: 'skill-catalog', form: 'catalog',
+              entries: [{ name: 'imagegen', description: 'Generate images' }],
+            } as unknown as { kind: 'user' },
+            content: [{ type: 'text', text: 'old catalog' }],
+          }),
+          createUserMessage({
+            source: {
+              kind: 'skill-catalog', form: 'catalog',
+              entries: [{ name: 'code-review-gate', description: 'Review code changes' }],
+            } as unknown as { kind: 'user' },
+            content: [{ type: 'text', text: 'replacement catalog' }],
+          }),
+          createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '生成图片' }] }),
+        ],
+        tools: [{ name: 'skill', description: 'Load a Harness skill', parameters: { type: 'object' } }],
+      })) chunks.push(chunk)
+    } finally {
+      await rm(codexHome, { recursive: true, force: true })
+    }
     expect(chunks).toContainEqual(expect.objectContaining({
-      type: 'block-end',
-      block: { type: 'tool-call', id: 'call-1', name: 'skill', arguments: '{"name":"imagegen"}' },
+      type: 'block-end', block: expect.objectContaining({ type: 'image' }),
     }))
-    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'tool-calls' } })
-    expect(client.requests).toContainEqual({
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(client.requests).not.toContainEqual({
       method: 'turn/interrupt', params: { threadId: 'thread-1', turnId: 'turn-1' },
     })
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.dynamicTools).toEqual([{
@@ -282,6 +333,38 @@ describe('OpenAI account connector', () => {
     expect(client.requests.find(request => request.method === 'thread/start')?.params?.developerInstructions).toContain(
       'For image requests, use built-in image generation directly; never use a Harness tool to load an image skill.',
     )
+    expect(client.toolResponses).toEqual([{
+      success: false,
+      contentItems: [{
+        type: 'inputText',
+        text: 'This Harness skill is unavailable. Do not retry it. Use a suitable built-in tool directly if one matches the user request; otherwise answer without it.',
+      }],
+    }])
+  })
+
+  it('still delegates a skill advertised by the current catalog', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.toolRequest = { namespace: 'dsh', tool: 'skill', arguments: { name: 'frontend-design' } }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model: 'gpt-test',
+      messages: [createUserMessage({
+        source: {
+          kind: 'skill-catalog', form: 'catalog',
+          entries: [{ name: 'frontend-design', description: 'Build production interfaces' }],
+        } as unknown as { kind: 'user' },
+        content: [{ type: 'text', text: 'available skills' }],
+      })],
+      tools: [{ name: 'skill', description: 'Load a Harness skill', parameters: { type: 'object' } }],
+    })) chunks.push(chunk)
+    expect(chunks).toContainEqual(expect.objectContaining({
+      type: 'block-end',
+      block: { type: 'tool-call', id: 'call-1', name: 'skill', arguments: '{"name":"frontend-design"}' },
+    }))
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'tool-calls' } })
     expect(client.toolResponse).toEqual({
       success: false,
       contentItems: [{ type: 'inputText', text: 'Tool execution is delegated to DeepSeek Harness.' }],
