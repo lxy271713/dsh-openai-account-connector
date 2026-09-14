@@ -10,8 +10,12 @@
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
-dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.0
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.1
 ```
+
+Connector 已内置并锁定经过测试的 Codex Runtime，用户只需完成 OpenAI 网页登录。每次获取模型列表时都会从该 Runtime 刷新；高级用户仍可通过 `CODEX_BIN` 或插件 `executable` 配置改用系统 Codex CLI。
+
+升级 Connector 会同步升级与之兼容的 Codex Runtime，但不会绕过 OpenAI 对当前登录账号的模型开放范围。图片生成按账号实时能力提供，不一定作为一个可选择的独立模型显示。
 
 账号入口 bundle 独占 Harness authorization registry 和通用 UI；本 bundle 只拥有 OpenAI Flow 与 Adapter，并让它单独接管 `openai-codex`，避免通用 pi-ai Adapter 和专用 Adapter 同时成为同一路线的所有者。卸载本 Connector 不会移除其他 Provider 的账号入口。Provider 名称只存在于本专用 Connector 和 bundle 配置中；账号 UI、Bridge 和 Harness 核心没有 OpenAI 分支。
 

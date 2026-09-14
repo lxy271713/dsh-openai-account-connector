@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { accessSync, constants, lstatSync, readdirSync, realpathSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, dirname, delimiter, isAbsolute, join } from 'node:path'
+import { arch, platform } from 'node:process'
 import readline from 'node:readline'
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -121,7 +123,7 @@ export class AppServerClient {
       if (this.generation === generation) this.reset(new Error('OpenAI account runtime exited'))
     })
     const initialized = await this.requestRaw('initialize', {
-      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.0' },
+      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.1' },
       capabilities: { experimentalApi: true, requestAttestation: false },
     }) as { codexHome?: unknown }
     if (typeof initialized.codexHome !== 'string' || !isAbsolute(initialized.codexHome)) {
@@ -259,6 +261,7 @@ export function resolveCodexExecutable(
   explicit: string | undefined = process.env.CODEX_BIN,
   environment: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  bundledResolver: () => string | undefined = resolveBundledCodexExecutable,
 ): string {
   if (explicit !== undefined) {
     assertExecutable(explicit)
@@ -266,6 +269,9 @@ export function resolveCodexExecutable(
     if (resolved) return resolved
     throw new AppServerRequestError('Configured Codex CLI was not found or is not executable', 'CODEX_NOT_FOUND')
   }
+
+  const bundled = bundledResolver()
+  if (bundled) return bundled
 
   const fromPath = executableFile('codex', environment.PATH)
   if (fromPath) return fromPath
@@ -284,9 +290,40 @@ export function resolveCodexExecutable(
     if (resolved) return resolved
   }
   throw new AppServerRequestError(
-    'Codex CLI was not found. Install the Codex CLI, then restart DSH Desktop.',
+    'The bundled Codex runtime is unavailable and no system Codex CLI was found. Reinstall the OpenAI account connector.',
     'CODEX_NOT_FOUND',
   )
+}
+
+const CODEX_TARGETS: Record<string, { packageName: string; triple: string }> = {
+  'darwin-arm64': { packageName: '@openai/codex-darwin-arm64', triple: 'aarch64-apple-darwin' },
+  'darwin-x64': { packageName: '@openai/codex-darwin-x64', triple: 'x86_64-apple-darwin' },
+  'linux-arm64': { packageName: '@openai/codex-linux-arm64', triple: 'aarch64-unknown-linux-musl' },
+  'linux-x64': { packageName: '@openai/codex-linux-x64', triple: 'x86_64-unknown-linux-musl' },
+  'win32-arm64': { packageName: '@openai/codex-win32-arm64', triple: 'aarch64-pc-windows-msvc' },
+  'win32-x64': { packageName: '@openai/codex-win32-x64', triple: 'x86_64-pc-windows-msvc' },
+}
+
+/** Resolve the native Codex binary shipped with this connector's pinned runtime. */
+export function resolveBundledCodexExecutable(): string | undefined {
+  const target = CODEX_TARGETS[`${platform}-${arch}`]
+  if (!target) return undefined
+  try {
+    const localRequire = createRequire(import.meta.url)
+    const codexPackage = localRequire.resolve('@openai/codex/package.json')
+    const platformRequire = createRequire(codexPackage)
+    const platformPackage = platformRequire.resolve(`${target.packageName}/package.json`)
+    const executable = join(
+      dirname(platformPackage),
+      'vendor',
+      target.triple,
+      'bin',
+      platform === 'win32' ? 'codex.exe' : 'codex',
+    )
+    return executableFile(executable)
+  } catch {
+    return undefined
+  }
 }
 
 function executableFile(command: string, pathValue?: string): string | undefined {

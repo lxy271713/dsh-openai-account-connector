@@ -13,7 +13,7 @@ export const name = 'openai-account-connector'
 export const inject = ['llm', 'attachments']
 
 export interface Config {
-  /** Optional advanced override; normal installations discover the Codex CLI automatically. */
+  /** Optional advanced override; normal installations use the connector-managed Codex runtime. */
   executable?: string
 }
 

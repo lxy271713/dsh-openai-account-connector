@@ -6,7 +6,7 @@ import { AttachmentId, type ImageAttachmentLimits, type SaveImageAttachment } fr
 import type { AuthorizationFlow, AuthorizationSession } from '@deepseek-ai/dsh-authorization'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
-import { AppServerClient, resolveCodexExecutable, type AppServerInboundRequest, type AppServerNotification } from '../src/app-server.ts'
+import { AppServerClient, resolveBundledCodexExecutable, resolveCodexExecutable, type AppServerInboundRequest, type AppServerNotification } from '../src/app-server.ts'
 import { OpenAIAccountAdapter } from '../src/adapter.ts'
 import { CONNECTION_KEY, PROVIDER_ID, registerAuthorization } from '../src/authorization.ts'
 
@@ -176,7 +176,22 @@ describe('OpenAI account connector', () => {
     await symlink(target, executable)
 
     // Keep the npm bin entry so executableEnvironment also exposes its sibling node.
-    expect(resolveCodexExecutable(undefined, { PATH: '/usr/bin:/bin' }, root)).toBe(executable)
+    expect(resolveCodexExecutable(undefined, { PATH: '/usr/bin:/bin' }, root, () => undefined)).toBe(executable)
+  })
+
+  it('prefers the connector-managed runtime over a system Codex CLI', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
+    const system = join(root, 'bin', 'codex')
+    const bundled = join(root, 'plugin', 'codex')
+    await mkdir(dirname(system), { recursive: true })
+    await writeFile(system, '#!/bin/sh\n')
+    await chmod(system, 0o755)
+
+    expect(resolveCodexExecutable(undefined, { PATH: dirname(system) }, root, () => bundled)).toBe(bundled)
+  })
+
+  it('resolves the native Codex binary installed with the connector', () => {
+    expect(resolveBundledCodexExecutable()).toMatch(/vendor.+bin.+codex(?:\.exe)?$/)
   })
 
   it('prefers an explicit executable over PATH and automatic discovery', async () => {
@@ -185,12 +200,12 @@ describe('OpenAI account connector', () => {
     await writeFile(executable, '#!/bin/sh\n')
     await chmod(executable, 0o755)
 
-    expect(resolveCodexExecutable(executable, { PATH: '' }, root)).toBe(executable)
+    expect(resolveCodexExecutable(executable, { PATH: '' }, root, () => '/bundled/codex')).toBe(executable)
   })
 
   it('reports a missing Codex CLI before starting account login', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
-    expect(() => resolveCodexExecutable(undefined, { PATH: '' }, root)).toThrow('Codex CLI was not found')
+    expect(() => resolveCodexExecutable(undefined, { PATH: '' }, root, () => undefined)).toThrow('bundled Codex runtime is unavailable')
   })
 
   it('asks only for official browser login and commits an ambient connection marker', async () => {

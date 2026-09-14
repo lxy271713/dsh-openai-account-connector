@@ -10,8 +10,12 @@ This release supports formal DSH Desktop 2.0.3 when `dsh-account-authorization@0
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
-dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.0
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.1
 ```
+
+The connector includes a tested Codex runtime, so users only need to complete the OpenAI browser login. Model choices are refreshed from that runtime on every model-list request. Advanced installations may still set `CODEX_BIN` or the plugin's `executable` option to use a system Codex CLI.
+
+Updating the connector updates its compatible Codex runtime; it does not grant models that OpenAI has not enabled for the signed-in account. Image generation is exposed as a live account capability and may not appear as a separate selectable model.
 
 The account-surface bundle owns the Harness authorization registry and shared UI. This Connector bundle owns only the OpenAI flow and adapter, and assigns `openai-codex` to that adapter so the generic pi-ai adapter and this adapter never own the same route. Removing this Connector therefore cannot remove another Provider's account surface.
 
