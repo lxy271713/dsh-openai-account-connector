@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { dirname, delimiter, isAbsolute } from 'node:path'
+import { accessSync, constants, lstatSync, readdirSync, realpathSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { basename, dirname, delimiter, isAbsolute, join } from 'node:path'
 import readline from 'node:readline'
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -44,11 +46,13 @@ export class AppServerClient {
   private codexHome: string | null = null
 
   constructor(
-    private readonly executable = process.env.CODEX_BIN || 'codex',
+    executable: string | undefined = undefined,
     private readonly spawnProcess: typeof spawn = spawn,
   ) {
-    assertExecutable(executable)
+    this.executable = resolveCodexExecutable(executable)
   }
+
+  private readonly executable: string
 
   /** Send one bounded JSON-RPC request. */
   async request<T = unknown>(
@@ -248,6 +252,80 @@ function assertExecutable(executable: string): void {
     || (!isAbsolute(executable) && !/^[A-Za-z0-9._-]+$/.test(executable))) {
     throw new Error('Codex executable must be an absolute path or command name')
   }
+}
+
+/** Resolve Codex without relying on the restricted PATH inherited by macOS GUI apps. */
+export function resolveCodexExecutable(
+  explicit: string | undefined = process.env.CODEX_BIN,
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+): string {
+  if (explicit !== undefined) {
+    assertExecutable(explicit)
+    const resolved = executableFile(explicit, environment.PATH)
+    if (resolved) return resolved
+    throw new AppServerRequestError('Configured Codex CLI was not found or is not executable', 'CODEX_NOT_FOUND')
+  }
+
+  const fromPath = executableFile('codex', environment.PATH)
+  if (fromPath) return fromPath
+
+  const candidates = [
+    '/opt/homebrew/bin/codex',
+    '/usr/local/bin/codex',
+    join(home, '.local', 'bin', 'codex'),
+    join(home, '.volta', 'bin', 'codex'),
+    join(home, '.asdf', 'shims', 'codex'),
+    join(home, '.local', 'share', 'pnpm', 'codex'),
+    ...nvmCandidates(home),
+  ]
+  for (const candidate of candidates) {
+    const resolved = executableFile(candidate)
+    if (resolved) return resolved
+  }
+  throw new AppServerRequestError(
+    'Codex CLI was not found. Install the Codex CLI, then restart DSH Desktop.',
+    'CODEX_NOT_FOUND',
+  )
+}
+
+function executableFile(command: string, pathValue?: string): string | undefined {
+  const candidates = isAbsolute(command)
+    ? [command]
+    : (pathValue || '').split(delimiter).filter(Boolean).map(directory => join(directory, command))
+  for (const candidate of candidates) {
+    try {
+      const resolved = realpathSync(candidate)
+      if (!lstatSync(resolved).isFile()) continue
+      accessSync(resolved, constants.X_OK)
+      return candidate
+    } catch {
+      // Missing, non-executable, and broken-link candidates are not usable.
+    }
+  }
+  return undefined
+}
+
+function nvmCandidates(home: string): string[] {
+  const versionsRoot = join(home, '.nvm', 'versions', 'node')
+  try {
+    return readdirSync(versionsRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^v\d+(?:\.\d+){0,2}$/.test(entry.name))
+      .map(entry => join(versionsRoot, entry.name, 'bin', 'codex'))
+      .sort((left, right) => compareNodeVersions(basename(dirname(dirname(right))), basename(dirname(dirname(left)))))
+  } catch {
+    return []
+  }
+}
+
+function compareNodeVersions(left: string, right: string): number {
+  const a = left.slice(1).split('.').map(Number)
+  const b = right.slice(1).split('.').map(Number)
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (a[index] || 0) - (b[index] || 0)
+    if (difference !== 0) return difference
+  }
+  return 0
 }
 
 /** True only for non-array JSON objects. */
