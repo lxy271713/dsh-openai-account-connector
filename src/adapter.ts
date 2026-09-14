@@ -48,6 +48,23 @@ const MAX_REQUEST_IMAGE_PIXELS = 2048 * 2048
 const MAX_REQUEST_IMAGE_TOTAL_BYTES = 20 * 1024 * 1024
 const TURN_INTERRUPT_TIMEOUT_MS = 2_000
 const DSH_TOOL_NAMESPACE = 'dsh'
+const ASTRA_PLANS = new Set(['plus', 'pro', 'business', 'enterprise'])
+const ASTRA_MODEL: CodexModel = {
+  id: 'gpt-6-astra',
+  model: 'gpt-6-astra',
+  displayName: 'GPT-6 Astra',
+  description: 'OpenAI flagship model for complex reasoning and coding.',
+  hidden: false,
+  inputModalities: ['text', 'image'],
+  defaultReasoningEffort: 'medium',
+  supportedReasoningEfforts: [
+    { reasoningEffort: 'low', description: 'Fast responses with lighter reasoning' },
+    { reasoningEffort: 'medium', description: 'Balances speed and reasoning depth' },
+    { reasoningEffort: 'high', description: 'Greater reasoning depth for complex problems' },
+    { reasoningEffort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+    { reasoningEffort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+  ],
+}
 const NO_WHOLE_TURN_RETRY = resolveRetryPolicy(
   { mode: 'normal', maxRetries: 0 },
   'dsh-openai-account-connector.retryPolicy',
@@ -74,8 +91,8 @@ export class OpenAIAccountAdapter extends LlmAdapter {
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     assertProvider(provider)
-    await this.assertAccount()
-    return (await this.models()).map(model => ({
+    const account = await this.assertAccount()
+    return (await this.models(undefined, astraAvailableForPlan(account.planType))).map(model => ({
       provider,
       id: model.model,
       name: model.displayName,
@@ -86,8 +103,8 @@ export class OpenAIAccountAdapter extends LlmAdapter {
 
   override async resolveModel(provider: string, id: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     assertProvider(provider)
-    await this.assertAccount(signal)
-    const model = (await this.models(signal)).find(candidate => candidate.model === id)
+    const account = await this.assertAccount(signal)
+    const model = (await this.models(signal, astraAvailableForPlan(account.planType))).find(candidate => candidate.model === id)
     if (!model) throw new LlmError(`OpenAI 账号没有提供模型 ${id}`, 'UNKNOWN_MODEL')
     const efforts: LlmReasoningEffortInfo[] = model.supportedReasoningEfforts.map(option => ({
       id: option.reasoningEffort as LlmReasoningEffortInfo['id'],
@@ -309,13 +326,14 @@ export class OpenAIAccountAdapter extends LlmAdapter {
     }
   }
 
-  private async assertAccount(signal?: AbortSignal): Promise<void> {
+  private async assertAccount(signal?: AbortSignal): Promise<Record<string, unknown>> {
     const result = await this.client.request<{ account?: unknown }>(
       'account/read', { refreshToken: false }, signalOptions(signal),
     )
     if (!isRecord(result.account) || result.account.type !== 'chatgpt') {
       throw new LlmError('OpenAI 尚未登录 ChatGPT 账号，请先连接账号', 'AUTH')
     }
+    return result.account
   }
 
   private async supportsImageGeneration(signal?: AbortSignal): Promise<boolean> {
@@ -336,7 +354,7 @@ export class OpenAIAccountAdapter extends LlmAdapter {
     return await abortable(this.imageGenerationProbe, signal)
   }
 
-  private async models(signal?: AbortSignal): Promise<CodexModel[]> {
+  private async models(signal?: AbortSignal, includeAstraFallback = false): Promise<CodexModel[]> {
     const models: CodexModel[] = []
     const cursors = new Set<string>()
     const routeIdentities = new Set<string>()
@@ -356,7 +374,10 @@ export class OpenAIAccountAdapter extends LlmAdapter {
         if (!model.hidden) models.push(model)
       }
       const next: unknown = response.nextCursor
-      if (next == null) return models
+      if (next == null) {
+        if (includeAstraFallback && !routeIdentities.has(ASTRA_MODEL.model)) models.unshift(ASTRA_MODEL)
+        return models
+      }
       if (typeof next !== 'string' || next.length === 0 || cursors.has(next)) {
         throw new LlmError('OpenAI 模型目录游标无效', 'TRANSPORT')
       }
@@ -365,6 +386,10 @@ export class OpenAIAccountAdapter extends LlmAdapter {
     }
     throw new LlmError('OpenAI 模型目录超过分页上限', 'TRANSPORT')
   }
+}
+
+function astraAvailableForPlan(value: unknown): boolean {
+  return typeof value === 'string' && ASTRA_PLANS.has(value.toLowerCase())
 }
 
 async function conversationInput(
