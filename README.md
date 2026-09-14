@@ -10,7 +10,7 @@ This release supports formal DSH Desktop 2.0.3 when `dsh-account-authorization@0
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
-dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.2
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.3
 ```
 
 The connector includes a tested Codex runtime, so users only need to complete the OpenAI browser login. Model choices are refreshed from that runtime on every model-list request. Advanced installations may still set `CODEX_BIN` or the plugin's `executable` option to use a system Codex CLI.

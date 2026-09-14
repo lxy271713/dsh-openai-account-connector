@@ -23,6 +23,7 @@ class FakeClient {
   additionalGeneratedPath: string | undefined
   completeLogin = true
   completedAccount: unknown = { type: 'chatgpt' }
+  modelCatalog: unknown[] = [model()]
   rejectForcedRefresh = false
   rejectInterrupt = false
   turnInterrupted = false
@@ -68,7 +69,7 @@ class FakeClient {
       } as T
     }
     if (method === 'modelProvider/capabilities/read') return { imageGeneration: true } as T
-    if (method === 'model/list') return { data: [model()], nextCursor: null } as T
+    if (method === 'model/list') return { data: this.modelCatalog, nextCursor: null } as T
     if (method === 'thread/start') {
       this.cwd = String(params?.cwd)
       return { thread: { id: 'thread-1' } } as T
@@ -337,6 +338,38 @@ describe('OpenAI account connector', () => {
       prompt: async () => { throw new Error('unexpected prompt') },
     })).rejects.toThrow('未返回 ChatGPT 账号')
     expect(modifyRecord).not.toHaveBeenCalled()
+  })
+
+  it('adds GPT-6 Astra when an eligible account catalog omits it', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt', planType: 'pro' }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+
+    expect(await adapter.listModels(PROVIDER_ID)).toEqual([
+      expect.objectContaining({ id: 'gpt-6-astra', name: 'GPT-6 Astra' }),
+      expect.objectContaining({ id: 'gpt-test' }),
+    ])
+  })
+
+  it('does not add GPT-6 Astra for an ineligible account', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt', planType: 'free' }
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+
+    expect(await adapter.listModels(PROVIDER_ID)).toEqual([
+      expect.objectContaining({ id: 'gpt-test' }),
+    ])
+  })
+
+  it('keeps the App Server GPT-6 Astra entry when the catalog includes it', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt', planType: 'pro' }
+    client.modelCatalog = [{ ...model(), id: 'gpt-6-astra', model: 'gpt-6-astra', displayName: 'Server Astra' }]
+    const adapter = new OpenAIAccountAdapter(client as unknown as AppServerClient)
+
+    expect(await adapter.listModels(PROVIDER_ID)).toEqual([
+      expect.objectContaining({ id: 'gpt-6-astra', name: 'Server Astra' }),
+    ])
   })
 
   it('streams a generated image into the Harness attachment result', async () => {
