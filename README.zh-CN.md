@@ -10,7 +10,7 @@
 
 ```sh
 dsh plugin --profile desktop add --save-exact dsh-account-authorization@0.1.0
-dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.1
+dsh plugin --profile desktop add --save-exact dsh-openai-account-connector@0.1.2
 ```
 
 Connector 已内置并锁定经过测试的 Codex Runtime，用户只需完成 OpenAI 网页登录。每次获取模型列表时都会从该 Runtime 刷新；高级用户仍可通过 `CODEX_BIN` 或插件 `executable` 配置改用系统 Codex CLI。
