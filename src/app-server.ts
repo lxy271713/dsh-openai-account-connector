@@ -1,5 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { dirname, delimiter, isAbsolute } from 'node:path'
+import { accessSync, constants, lstatSync, readdirSync, realpathSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { homedir } from 'node:os'
+import { basename, dirname, delimiter, isAbsolute, join } from 'node:path'
+import { arch, platform } from 'node:process'
 import readline from 'node:readline'
 
 const REQUEST_TIMEOUT_MS = 30_000
@@ -44,11 +48,13 @@ export class AppServerClient {
   private codexHome: string | null = null
 
   constructor(
-    private readonly executable = process.env.CODEX_BIN || 'codex',
+    executable: string | undefined = undefined,
     private readonly spawnProcess: typeof spawn = spawn,
   ) {
-    assertExecutable(executable)
+    this.executable = resolveCodexExecutable(executable)
   }
+
+  private readonly executable: string
 
   /** Send one bounded JSON-RPC request. */
   async request<T = unknown>(
@@ -117,7 +123,7 @@ export class AppServerClient {
       if (this.generation === generation) this.reset(new Error('OpenAI account runtime exited'))
     })
     const initialized = await this.requestRaw('initialize', {
-      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.0' },
+      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.1' },
       capabilities: { experimentalApi: true, requestAttestation: false },
     }) as { codexHome?: unknown }
     if (typeof initialized.codexHome !== 'string' || !isAbsolute(initialized.codexHome)) {
@@ -248,6 +254,115 @@ function assertExecutable(executable: string): void {
     || (!isAbsolute(executable) && !/^[A-Za-z0-9._-]+$/.test(executable))) {
     throw new Error('Codex executable must be an absolute path or command name')
   }
+}
+
+/** Resolve Codex without relying on the restricted PATH inherited by macOS GUI apps. */
+export function resolveCodexExecutable(
+  explicit: string | undefined = process.env.CODEX_BIN,
+  environment: NodeJS.ProcessEnv = process.env,
+  home = homedir(),
+  bundledResolver: () => string | undefined = resolveBundledCodexExecutable,
+): string {
+  if (explicit !== undefined) {
+    assertExecutable(explicit)
+    const resolved = executableFile(explicit, environment.PATH)
+    if (resolved) return resolved
+    throw new AppServerRequestError('Configured Codex CLI was not found or is not executable', 'CODEX_NOT_FOUND')
+  }
+
+  const bundled = bundledResolver()
+  if (bundled) return bundled
+
+  const fromPath = executableFile('codex', environment.PATH)
+  if (fromPath) return fromPath
+
+  const candidates = [
+    '/opt/homebrew/bin/codex',
+    '/usr/local/bin/codex',
+    join(home, '.local', 'bin', 'codex'),
+    join(home, '.volta', 'bin', 'codex'),
+    join(home, '.asdf', 'shims', 'codex'),
+    join(home, '.local', 'share', 'pnpm', 'codex'),
+    ...nvmCandidates(home),
+  ]
+  for (const candidate of candidates) {
+    const resolved = executableFile(candidate)
+    if (resolved) return resolved
+  }
+  throw new AppServerRequestError(
+    'The bundled Codex runtime is unavailable and no system Codex CLI was found. Reinstall the OpenAI account connector.',
+    'CODEX_NOT_FOUND',
+  )
+}
+
+const CODEX_TARGETS: Record<string, { packageName: string; triple: string }> = {
+  'darwin-arm64': { packageName: '@openai/codex-darwin-arm64', triple: 'aarch64-apple-darwin' },
+  'darwin-x64': { packageName: '@openai/codex-darwin-x64', triple: 'x86_64-apple-darwin' },
+  'linux-arm64': { packageName: '@openai/codex-linux-arm64', triple: 'aarch64-unknown-linux-musl' },
+  'linux-x64': { packageName: '@openai/codex-linux-x64', triple: 'x86_64-unknown-linux-musl' },
+  'win32-arm64': { packageName: '@openai/codex-win32-arm64', triple: 'aarch64-pc-windows-msvc' },
+  'win32-x64': { packageName: '@openai/codex-win32-x64', triple: 'x86_64-pc-windows-msvc' },
+}
+
+/** Resolve the native Codex binary shipped with this connector's pinned runtime. */
+export function resolveBundledCodexExecutable(): string | undefined {
+  const target = CODEX_TARGETS[`${platform}-${arch}`]
+  if (!target) return undefined
+  try {
+    const localRequire = createRequire(import.meta.url)
+    const codexPackage = localRequire.resolve('@openai/codex/package.json')
+    const platformRequire = createRequire(codexPackage)
+    const platformPackage = platformRequire.resolve(`${target.packageName}/package.json`)
+    const executable = join(
+      dirname(platformPackage),
+      'vendor',
+      target.triple,
+      'bin',
+      platform === 'win32' ? 'codex.exe' : 'codex',
+    )
+    return executableFile(executable)
+  } catch {
+    return undefined
+  }
+}
+
+function executableFile(command: string, pathValue?: string): string | undefined {
+  const candidates = isAbsolute(command)
+    ? [command]
+    : (pathValue || '').split(delimiter).filter(Boolean).map(directory => join(directory, command))
+  for (const candidate of candidates) {
+    try {
+      const resolved = realpathSync(candidate)
+      if (!lstatSync(resolved).isFile()) continue
+      accessSync(resolved, constants.X_OK)
+      return candidate
+    } catch {
+      // Missing, non-executable, and broken-link candidates are not usable.
+    }
+  }
+  return undefined
+}
+
+function nvmCandidates(home: string): string[] {
+  const versionsRoot = join(home, '.nvm', 'versions', 'node')
+  try {
+    return readdirSync(versionsRoot, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^v\d+(?:\.\d+){0,2}$/.test(entry.name))
+      .map(entry => join(versionsRoot, entry.name, 'bin', 'codex'))
+      .sort((left, right) => compareNodeVersions(basename(dirname(dirname(right))), basename(dirname(dirname(left)))))
+  } catch {
+    return []
+  }
+}
+
+function compareNodeVersions(left: string, right: string): number {
+  const a = left.slice(1).split('.').map(Number)
+  const b = right.slice(1).split('.').map(Number)
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (a[index] || 0) - (b[index] || 0)
+    if (difference !== 0) return difference
+  }
+  return 0
 }
 
 /** True only for non-array JSON objects. */

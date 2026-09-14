@@ -1,12 +1,12 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { AttachmentId, type ImageAttachmentLimits, type SaveImageAttachment } from '@deepseek-ai/dsh-attachment'
 import type { AuthorizationFlow, AuthorizationSession } from '@deepseek-ai/dsh-authorization'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
-import { AppServerClient, type AppServerInboundRequest, type AppServerNotification } from '../src/app-server.ts'
+import { AppServerClient, resolveBundledCodexExecutable, resolveCodexExecutable, type AppServerInboundRequest, type AppServerNotification } from '../src/app-server.ts'
 import { OpenAIAccountAdapter } from '../src/adapter.ts'
 import { CONNECTION_KEY, PROVIDER_ID, registerAuthorization } from '../src/authorization.ts'
 
@@ -163,6 +163,49 @@ describe('OpenAI account connector', () => {
   it('rejects ambiguous executable paths before spawning a process', () => {
     expect(() => new AppServerClient('../codex')).toThrow('absolute path or command name')
     expect(() => new AppServerClient('')).toThrow('absolute path or command name')
+  })
+
+  it('discovers Codex in an NVM install when a GUI PATH cannot see it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
+    const executable = join(root, '.nvm', 'versions', 'node', 'v24.15.0', 'bin', 'codex')
+    const target = join(root, '.nvm', 'versions', 'node', 'v24.15.0', 'lib', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+    await mkdir(dirname(executable), { recursive: true })
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, '#!/usr/bin/env node\n')
+    await chmod(target, 0o755)
+    await symlink(target, executable)
+
+    // Keep the npm bin entry so executableEnvironment also exposes its sibling node.
+    expect(resolveCodexExecutable(undefined, { PATH: '/usr/bin:/bin' }, root, () => undefined)).toBe(executable)
+  })
+
+  it('prefers the connector-managed runtime over a system Codex CLI', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
+    const system = join(root, 'bin', 'codex')
+    const bundled = join(root, 'plugin', 'codex')
+    await mkdir(dirname(system), { recursive: true })
+    await writeFile(system, '#!/bin/sh\n')
+    await chmod(system, 0o755)
+
+    expect(resolveCodexExecutable(undefined, { PATH: dirname(system) }, root, () => bundled)).toBe(bundled)
+  })
+
+  it('resolves the native Codex binary installed with the connector', () => {
+    expect(resolveBundledCodexExecutable()).toMatch(/vendor.+bin.+codex(?:\.exe)?$/)
+  })
+
+  it('prefers an explicit executable over PATH and automatic discovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
+    const executable = join(root, 'selected-codex')
+    await writeFile(executable, '#!/bin/sh\n')
+    await chmod(executable, 0o755)
+
+    expect(resolveCodexExecutable(executable, { PATH: '' }, root, () => '/bundled/codex')).toBe(executable)
+  })
+
+  it('reports a missing Codex CLI before starting account login', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-openai-home-'))
+    expect(() => resolveCodexExecutable(undefined, { PATH: '' }, root, () => undefined)).toThrow('bundled Codex runtime is unavailable')
   })
 
   it('asks only for official browser login and commits an ambient connection marker', async () => {
