@@ -23,11 +23,16 @@ export function registerAuthorization(ctx: Context, client: AppServerClient): vo
     methods: [{ id: 'browser', label: '浏览器登录' }],
     async run(session) {
       session.signal.throwIfAborted()
-      const current = await client.request<{ account?: unknown }>(
+      const replacing = (await ctx.credentials.listRecords()).some(record => record.key === CONNECTION_KEY)
+      if (replacing) {
+        await client.request('account/logout', undefined, { signal: session.signal })
+        await ctx.credentials.modifyRecord(CONNECTION_KEY, async () => undefined)
+      }
+      const current = replacing ? undefined : await client.request<{ account?: unknown }>(
         'account/read', { refreshToken: false }, { signal: session.signal },
       )
       session.signal.throwIfAborted()
-      if (!isChatGptAccount(current.account)) {
+      if (replacing || !isChatGptAccount(current?.account)) {
         await browserLogin(client, session)
         const verified = await client.request<{ account?: unknown }>(
           'account/read', { refreshToken: true }, { signal: session.signal },

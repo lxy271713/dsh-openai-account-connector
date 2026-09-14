@@ -151,6 +151,10 @@ class FakeClient {
       return {} as T
     }
     if (method === 'account/login/cancel') return {} as T
+    if (method === 'account/logout') {
+      this.account = null
+      return {} as T
+    }
     throw new Error(`unexpected request: ${method}`)
   }
 
@@ -214,7 +218,7 @@ describe('OpenAI account connector', () => {
     const modifyRecord = vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined))
     const ctx = {
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord },
+      credentials: { listRecords: async () => [], modifyRecord },
     } as unknown as Context
     registerAuthorization(ctx, client as unknown as AppServerClient)
 
@@ -242,7 +246,7 @@ describe('OpenAI account connector', () => {
     const modifyRecord = vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined))
     registerAuthorization({
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord },
+      credentials: { listRecords: async () => [], modifyRecord },
     } as unknown as Context, client as unknown as AppServerClient)
 
     await flow!.run({
@@ -254,13 +258,63 @@ describe('OpenAI account connector', () => {
     expect(client.requests).not.toContainEqual({ method: 'account/read', params: { refreshToken: true } })
   })
 
+  it('logs out and starts a fresh browser login when replacing a configured account', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    let flow: AuthorizationFlow | undefined
+    registerAuthorization({
+      authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
+      credentials: {
+        listRecords: async () => [{ key: CONNECTION_KEY, kind: 'api-key' }],
+        modifyRecord: vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined)),
+      },
+    } as unknown as Context, client as unknown as AppServerClient)
+
+    await flow!.run({
+      method: 'browser', signal: new AbortController().signal, notify: vi.fn(),
+      prompt: async () => { throw new Error('unexpected prompt') },
+    })
+
+    expect(client.requests.map(request => request.method)).toEqual([
+      'account/logout', 'account/login/start', 'account/read',
+    ])
+  })
+
+  it('removes the stale connection marker when replacement login fails', async () => {
+    const client = new FakeClient()
+    client.account = { type: 'chatgpt' }
+    client.completedAccount = { type: 'apiKey' }
+    let flow: AuthorizationFlow | undefined
+    const modifyRecord = vi.fn(async (_key: unknown, update: (current: { kind: 'api-key' } | undefined) => unknown) => (
+      update({ kind: 'api-key' })
+    ))
+    registerAuthorization({
+      authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
+      credentials: {
+        listRecords: async () => [{ key: CONNECTION_KEY, kind: 'api-key' }],
+        modifyRecord,
+      },
+    } as unknown as Context, client as unknown as AppServerClient)
+
+    await expect(flow!.run({
+      method: 'browser', signal: new AbortController().signal, notify: vi.fn(),
+      prompt: async () => { throw new Error('unexpected prompt') },
+    })).rejects.toThrow('未返回 ChatGPT 账号')
+
+    expect(modifyRecord).toHaveBeenCalledOnce()
+    expect(await modifyRecord.mock.calls[0]![1]({ kind: 'api-key' })).toBeUndefined()
+  })
+
   it('does not accept a non-ChatGPT account as an existing browser connection', async () => {
     const client = new FakeClient()
     client.account = { type: 'apiKey' }
     let flow: AuthorizationFlow | undefined
     registerAuthorization({
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord: vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined)) },
+      credentials: {
+        listRecords: async () => [],
+        modifyRecord: vi.fn(async (_key: unknown, update: (current: undefined) => unknown) => update(undefined)),
+      },
     } as unknown as Context, client as unknown as AppServerClient)
     await flow!.run({
       method: 'browser', signal: new AbortController().signal, notify: vi.fn(),
@@ -276,7 +330,7 @@ describe('OpenAI account connector', () => {
     const modifyRecord = vi.fn()
     registerAuthorization({
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord },
+      credentials: { listRecords: async () => [], modifyRecord },
     } as unknown as Context, client as unknown as AppServerClient)
     await expect(flow!.run({
       method: 'browser', signal: new AbortController().signal, notify: vi.fn(),
@@ -574,7 +628,7 @@ describe('OpenAI account connector', () => {
     const modifyRecord = vi.fn()
     registerAuthorization({
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord },
+      credentials: { listRecords: async () => [], modifyRecord },
     } as unknown as Context, client as unknown as AppServerClient)
     const notify = vi.fn()
     await expect(flow!.run({
@@ -592,7 +646,7 @@ describe('OpenAI account connector', () => {
     const modifyRecord = vi.fn()
     registerAuthorization({
       authorization: { registerFlow: (value: AuthorizationFlow) => { flow = value; return () => undefined } },
-      credentials: { modifyRecord },
+      credentials: { listRecords: async () => [], modifyRecord },
     } as unknown as Context, client as unknown as AppServerClient)
     const controller = new AbortController()
     await expect(flow!.run({
