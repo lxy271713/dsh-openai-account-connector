@@ -123,7 +123,7 @@ export class AppServerClient {
       if (this.generation === generation) this.reset(new Error('OpenAI account runtime exited'))
     })
     const initialized = await this.requestRaw('initialize', {
-      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.3' },
+      clientInfo: { name: 'dsh-openai-account-connector', title: 'DeepSeek Harness', version: '0.1.4' },
       capabilities: { experimentalApi: true, requestAttestation: false },
     }) as { codexHome?: unknown }
     if (typeof initialized.codexHome !== 'string' || !isAbsolute(initialized.codexHome)) {
